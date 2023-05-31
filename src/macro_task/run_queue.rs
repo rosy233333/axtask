@@ -12,7 +12,7 @@ cfg_if::cfg_if! {
     }
 }
 
-use crate::{AxTaskRef, Scheduler, TaskInner, WaitQueue};
+use crate::{AxTaskRef, Scheduler, TaskInner, WaitQueue, KERNEL_PROCESS_ID};
 
 // TODO: per-CPU
 pub(crate) static RUN_QUEUE: LazyInit<SpinNoIrq<AxRunQueue>> = LazyInit::new();
@@ -31,7 +31,14 @@ pub(crate) struct AxRunQueue {
 
 impl AxRunQueue {
     pub fn new() -> SpinNoIrq<Self> {
-        let gc_task = TaskInner::new(gc_entry, "gc".into(), axconfig::TASK_STACK_SIZE);
+        // 注意，此时是通过用户程序启动的，所以原有的arceos不要动
+        let gc_task = TaskInner::new(
+            gc_entry,
+            "gc".into(),
+            axconfig::TASK_STACK_SIZE,
+            KERNEL_PROCESS_ID,
+            0,
+        );
         let mut scheduler = Scheduler::new();
         scheduler.add_task(gc_task);
         SpinNoIrq::new(Self { scheduler })
@@ -182,16 +189,20 @@ impl AxRunQueue {
         if prev_task.ptr_eq(&next_task) {
             return;
         }
-
+        // 当任务进行切换时，更新两个任务的时间统计信息
+        next_task.time_stat_when_switch_to();
+        prev_task.time_stat_when_switch_from();
         unsafe {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
             let next_ctx_ptr = next_task.ctx_mut_ptr();
-
             // The strong reference count of `prev_task` will be decremented by 1,
             // but won't be dropped until `gc_entry()` is called.
             assert!(Arc::strong_count(prev_task.as_task_ref()) > 1);
             assert!(Arc::strong_count(&next_task) >= 1);
-
+            let page_table_token = next_task.page_table_token();
+            if page_table_token != 0 {
+                axhal::arch::write_page_table_root(page_table_token.into());
+            }
             CurrentTask::set_current(prev_task, next_task);
             (*prev_ctx_ptr).switch_to(&*next_ctx_ptr);
         }
@@ -217,7 +228,13 @@ fn gc_entry() {
 
 pub(crate) fn init() {
     const IDLE_TASK_STACK_SIZE: usize = 4096;
-    let idle_task = TaskInner::new(|| crate::run_idle(), "idle".into(), IDLE_TASK_STACK_SIZE);
+    let idle_task = TaskInner::new(
+        || crate::run_idle(),
+        "idle".into(),
+        IDLE_TASK_STACK_SIZE,
+        KERNEL_PROCESS_ID,
+        0,
+    );
     IDLE_TASK.with_current(|i| i.init_by(idle_task.clone()));
 
     let main_task = TaskInner::new_init("main".into());
