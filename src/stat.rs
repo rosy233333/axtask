@@ -1,9 +1,8 @@
+//! 负责任务时间统计的实现
 use axhal::time::{current_time_nanos, NANOS_PER_MICROS, NANOS_PER_SEC};
-#[cfg(feature = "signal")]
 use axsignal::signal_no::SignalNo;
 #[cfg(feature = "signal")]
 use crate_interface::{call_interface, def_interface};
-
 numeric_enum_macro::numeric_enum! {
     #[repr(i32)]
     #[allow(non_camel_case_types)]
@@ -29,20 +28,6 @@ impl From<usize> for TimerType {
         }
     }
 }
-/// Singal caller interface.
-///
-/// This trait is defined with the [`#[def_interface]`][1] attribute. Users
-/// should implement it with [`#[impl_interface]`][2] in any other crate.
-///
-/// [1]: crate_interface::def_interface
-/// [2]: crate_interface::impl_interface
-#[cfg(feature = "signal")]
-#[def_interface]
-pub trait SignalCaller {
-    /// Handles interrupt requests for the given IRQ number.
-    fn send_signal(tid: isize, signum: isize);
-}
-
 pub struct TimeStat {
     /// 用户态经过的时间，单位为纳秒
     utime_ns: usize,
@@ -62,6 +47,13 @@ pub struct TimeStat {
     ///
     /// 根据timer_type的种类来进行计算，当归零的时候触发信号，同时进行更新
     timer_remained_ns: usize,
+}
+
+#[cfg(feature = "signal")]
+#[def_interface]
+pub trait SignalCaller {
+    /// Handles interrupt requests for the given IRQ number.
+    fn send_signal(tid: isize, signum: isize);
 }
 
 impl TimeStat {
@@ -175,6 +167,7 @@ impl TimeStat {
         }
         // 此时计时器已经结束了，需要进行重置
         self.timer_remained_ns = self.timer_interval_ns;
+
         #[cfg(feature = "signal")]
         {
             let signal_num = match &self.timer_type {
