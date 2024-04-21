@@ -6,11 +6,11 @@ use axhal::KERNEL_PROCESS_ID;
 use lazy_init::LazyInit;
 use scheduler::BaseScheduler;
 use spinlock::SpinNoIrq;
+use taskctx::TaskState;
 
-use crate::task::{CurrentTask, TaskState};
-use crate::{AxTaskRef, Scheduler, TaskInner, WaitQueue};
-#[cfg(feature = "monolithic")]
-use crate_interface::call_interface;
+use crate::schedule::notify_wait_for_exit;
+use crate::task::{new_init_task, new_task, CurrentTask};
+use crate::{AxTaskRef, Scheduler, WaitQueue};
 
 // TODO: per-CPU
 /// The running task-queue of the kernel.
@@ -31,16 +31,9 @@ pub struct AxRunQueue {
     scheduler: Scheduler,
 }
 
-#[crate_interface::def_interface]
-/// VforkSet for syscall vfork
-pub trait VforkSet {
-    /// Set vfork status through process_id
-    fn vfork_set(&self, process_id: u64, value: bool);
-}
-
 impl AxRunQueue {
     pub fn new() -> SpinNoIrq<Self> {
-        let gc_task = TaskInner::new(
+        let gc_task = new_task(
             gc_entry,
             "gc".into(),
             axconfig::TASK_STACK_SIZE,
@@ -48,7 +41,7 @@ impl AxRunQueue {
             KERNEL_PROCESS_ID,
             #[cfg(feature = "monolithic")]
             0,
-            #[cfg(feature = "signal")]
+            #[cfg(feature = "monolithic")]
             false,
         );
         let mut scheduler = Scheduler::new();
@@ -117,10 +110,9 @@ impl AxRunQueue {
             axhal::misc::terminate();
         } else {
             curr.set_state(TaskState::Exited);
-            curr.notify_exit(exit_code, self);
-            #[cfg(feature = "monolithic")]
-            //将父进程 blocked_by_vfork 设置为 false
-            call_interface!(VforkSet::vfork_set(curr.get_process_id(), false));
+            curr.set_exit_code(exit_code);
+            // curr.notify_exit(exit_code, self);
+            notify_wait_for_exit(curr.as_task_ref(), self);
             EXITED_TASKS.lock().push_back(curr.clone());
             WAIT_FOR_EXIT.notify_one_locked(false, self);
             self.resched(false);
@@ -224,7 +216,7 @@ impl AxRunQueue {
                 let mask = task.get_cpu_set();
                 let curr_cpu = this_cpu_id();
                 // 如果当前进程没有被 vfork 阻塞，弹出任务
-                if mask & (1 << curr_cpu) != 0 && !task.is_vfork() {
+                if mask & (1 << curr_cpu) != 0 {
                     break task;
                 }
                 task_set.insert(task.id().as_u64());
@@ -257,8 +249,9 @@ impl AxRunQueue {
         // 当任务进行切换时，更新两个任务的时间统计信息
         #[cfg(feature = "monolithic")]
         {
-            next_task.time_stat_when_switch_to();
-            prev_task.time_stat_when_switch_from();
+            let current_timestamp = axhal::time::current_time_nanos() as usize;
+            next_task.time_stat_when_switch_to(current_timestamp);
+            prev_task.time_stat_when_switch_from(current_timestamp);
         }
         unsafe {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
@@ -277,7 +270,7 @@ impl AxRunQueue {
             }
 
             CurrentTask::set_current(prev_task, next_task);
-            (*prev_ctx_ptr).switch_to(&*next_ctx_ptr);
+            axhal::arch::task_context_switch(&mut (*prev_ctx_ptr), &(*next_ctx_ptr))
         }
     }
 }
@@ -306,7 +299,7 @@ fn gc_entry() {
 
 pub(crate) fn init() {
     const IDLE_TASK_STACK_SIZE: usize = 4096;
-    let idle_task = TaskInner::new(
+    let idle_task = new_task(
         || crate::run_idle(),
         "idle".into(), // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
         IDLE_TASK_STACK_SIZE,
@@ -314,12 +307,12 @@ pub(crate) fn init() {
         KERNEL_PROCESS_ID,
         #[cfg(feature = "monolithic")]
         0,
-        #[cfg(feature = "signal")]
+        #[cfg(feature = "monolithic")]
         false,
     );
     IDLE_TASK.with_current(|i| i.init_by(idle_task.clone()));
 
-    let main_task = TaskInner::new_init("main".into());
+    let main_task = new_init_task("main".into());
     main_task.set_state(TaskState::Running);
 
     RUN_QUEUE.init_by(AxRunQueue::new());
@@ -327,7 +320,7 @@ pub(crate) fn init() {
 }
 
 pub(crate) fn init_secondary() {
-    let idle_task = TaskInner::new_init("idle".into()); // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
+    let idle_task = new_init_task("idle".into()); // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
     idle_task.set_state(TaskState::Running);
     IDLE_TASK.with_current(|i| i.init_by(idle_task.clone()));
     unsafe { CurrentTask::init_current(idle_task) }

@@ -14,28 +14,26 @@ default = []
 
 multitask = [
     "dep:axconfig", "dep:percpu", "dep:spinlock", "dep:lazy_init", "dep:memory_addr",
-    "dep:scheduler", "dep:timer_list", "kernel_guard", "dep:crate_interface",
+    "dep:scheduler", "dep:timer_list", "kernel_guard","taskctx/multitask"
 ]
 irq = []
-tls = ["axhal/tls"]
-preempt = ["irq", "percpu?/preempt", "kernel_guard/preempt"]
+tls = ["axhal/tls", "taskctx/tls"]
+preempt = ["irq", "percpu?/preempt", "kernel_guard/preempt", "taskctx/preempt"]
 
 sched_fifo = ["multitask"]
 sched_rr = ["multitask", "preempt"]
 sched_cfs = ["multitask", "preempt"]
 
-signal = ["axhal/signal", "dep:axsignal", "dep:crate_interface"]
-
 test = ["percpu?/sp-naive"]
 
-monolithic = ["multitask", "axhal/monolithic"]
+monolithic = ["multitask", "axhal/monolithic", "taskctx/monolithic"]
 
 [dependencies]
 cfg-if = "1.0"
 log = "0.4"
 numeric-enum-macro = { git = "https://github.com/mexus/numeric-enum-macro" }
 axhal = { path = "../axhal" }
-axsignal = { path = "../axsignal", optional = true }
+axsignal = { path = "../axsignal" }
 axconfig = { path = "../axconfig", optional = true }
 percpu = { path = "../../crates/percpu", optional = true }
 spinlock = { path = "../../crates/spinlock", optional = true }
@@ -44,7 +42,7 @@ memory_addr = { path = "../../crates/memory_addr", optional = true }
 scheduler = { path = "../../crates/scheduler", optional = true }
 timer_list = { path = "../../crates/timer_list", optional = true }
 kernel_guard = { path = "../../crates/kernel_guard", optional = true }
-crate_interface = { path = "../../crates/crate_interface", optional = true }
+taskctx = { path = "../../crates/taskctx" }
 axlog = { path = "../axlog" }
 
 [dev-dependencies]

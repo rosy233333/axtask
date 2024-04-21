@@ -2,7 +2,10 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spinlock::SpinRaw;
 
-use crate::{AxRunQueue, AxTaskRef, CurrentTask, RUN_QUEUE};
+use crate::{
+    schedule::{add_to_wait_queue, in_wait_queue, remove_from_wait_queue},
+    AxRunQueue, AxTaskRef, CurrentTask, RUN_QUEUE,
+};
 
 /// A queue to store sleeping tasks.
 ///
@@ -48,15 +51,16 @@ impl WaitQueue {
     fn cancel_events(&self, curr: CurrentTask) {
         // A task can be wake up only one events (timer or `notify()`), remove
         // the event from another queue.
-        if curr.in_wait_queue() {
+        if in_wait_queue(curr.as_task_ref()) {
             // wake up by timer (timeout).
             // `RUN_QUEUE` is not locked here, so disable IRQs.
             let _guard = kernel_guard::IrqSave::new();
             self.queue.lock().retain(|t| !curr.ptr_eq(t));
-            curr.set_in_wait_queue(false);
+            // curr.set_in_wait_queue(false);
+            remove_from_wait_queue(curr.as_task_ref());
         }
         #[cfg(feature = "irq")]
-        if curr.in_timer_list() {
+        if crate::schedule::in_timer_list(curr.as_task_ref()) {
             // timeout was set but not triggered (wake up by `WaitQueue::notify()`)
             crate::timers::cancel_alarm(curr.as_task_ref());
         }
@@ -66,7 +70,8 @@ impl WaitQueue {
     /// notifies it.
     pub fn wait(&self) {
         RUN_QUEUE.lock().block_current(|task| {
-            task.set_in_wait_queue(true);
+            // task.set_in_wait_queue(true);
+            add_to_wait_queue(&task);
             self.queue.lock().push_back(task)
         });
         self.cancel_events(crate::current());
@@ -87,7 +92,8 @@ impl WaitQueue {
                 break;
             }
             rq.block_current(|task| {
-                task.set_in_wait_queue(true);
+                // task.set_in_wait_queue(true);
+                add_to_wait_queue(&task);
                 self.queue.lock().push_back(task);
             });
         }
@@ -98,6 +104,7 @@ impl WaitQueue {
     /// notify it, or the given duration has elapsed.
     #[cfg(feature = "irq")]
     pub fn wait_timeout(&self, dur: core::time::Duration) -> bool {
+        use crate::schedule::{add_to_wait_queue, in_wait_queue};
         let curr = crate::current();
         let deadline = axhal::time::current_time() + dur;
         debug!(
@@ -108,10 +115,12 @@ impl WaitQueue {
         crate::timers::set_alarm_wakeup(deadline, curr.clone());
 
         RUN_QUEUE.lock().block_current(|task| {
-            task.set_in_wait_queue(true);
+            // task.set_in_wait_queue(true);
+            add_to_wait_queue(&task);
             self.queue.lock().push_back(task)
         });
-        let timeout = curr.in_wait_queue(); // still in the wait queue, must have timed out
+        // let timeout = curr.in_wait_queue(); // still in the wait queue, must have timed out
+        let timeout = in_wait_queue(curr.as_task_ref());
         self.cancel_events(curr);
         timeout
     }
@@ -143,7 +152,8 @@ impl WaitQueue {
                 break;
             }
             rq.block_current(|task| {
-                task.set_in_wait_queue(true);
+                // task.set_in_wait_queue(true);
+                add_to_wait_queue(&task);
                 self.queue.lock().push_back(task);
             });
         }
@@ -172,7 +182,8 @@ impl WaitQueue {
         loop {
             let mut rq = RUN_QUEUE.lock();
             if let Some(task) = self.queue.lock().pop_front() {
-                task.set_in_wait_queue(false);
+                // task.set_in_wait_queue(false);
+                remove_from_wait_queue(&task);
                 rq.unblock_task(task, resched);
             } else {
                 break;
@@ -189,7 +200,8 @@ impl WaitQueue {
         let mut rq = RUN_QUEUE.lock();
         let mut wq = self.queue.lock();
         if let Some(index) = wq.iter().position(|t| Arc::ptr_eq(t, task)) {
-            task.set_in_wait_queue(false);
+            // task.set_in_wait_queue(false);
+            remove_from_wait_queue(&task);
             rq.unblock_task(wq.remove(index).unwrap(), resched);
             true
         } else {
@@ -199,7 +211,8 @@ impl WaitQueue {
 
     pub(crate) fn notify_one_locked(&self, resched: bool, rq: &mut AxRunQueue) -> bool {
         if let Some(task) = self.queue.lock().pop_front() {
-            task.set_in_wait_queue(false);
+            // task.set_in_wait_queue(false);
+            remove_from_wait_queue(&task);
             rq.unblock_task(task, resched);
             true
         } else {
@@ -209,7 +222,8 @@ impl WaitQueue {
 
     pub(crate) fn notify_all_locked(&self, resched: bool, rq: &mut AxRunQueue) {
         while let Some(task) = self.queue.lock().pop_front() {
-            task.set_in_wait_queue(false);
+            // task.set_in_wait_queue(false);
+            remove_from_wait_queue(&task);
             rq.unblock_task(task, resched);
         }
     }

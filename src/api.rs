@@ -3,11 +3,13 @@
 use alloc::{string::String, sync::Arc};
 #[cfg(feature = "monolithic")]
 use axhal::KERNEL_PROCESS_ID;
+use taskctx::TaskState;
 
 pub(crate) use crate::run_queue::{AxRunQueue, RUN_QUEUE};
 
+use crate::schedule::get_wait_for_exit_queue;
 #[doc(cfg(feature = "multitask"))]
-pub use crate::task::{CurrentTask, TaskId, TaskInner};
+pub use crate::task::{new_task, CurrentTask, TaskId, TaskInner};
 #[doc(cfg(feature = "multitask"))]
 pub use crate::wait_queue::WaitQueue;
 
@@ -26,25 +28,6 @@ cfg_if::cfg_if! {
         // If no scheduler features are set, use FIFO as the default.
         pub(crate) type AxTask = scheduler::FifoTask<TaskInner>;
         pub(crate) type Scheduler = scheduler::FifoScheduler<TaskInner>;
-    }
-}
-
-#[cfg(feature = "preempt")]
-struct KernelGuardIfImpl;
-
-#[cfg(feature = "preempt")]
-#[crate_interface::impl_interface]
-impl kernel_guard::KernelGuardIf for KernelGuardIfImpl {
-    fn disable_preempt() {
-        if let Some(curr) = current_may_uninit() {
-            curr.disable_preempt();
-        }
-    }
-
-    fn enable_preempt() {
-        if let Some(curr) = current_may_uninit() {
-            curr.enable_preempt(true);
-        }
     }
 }
 
@@ -89,6 +72,17 @@ pub fn on_timer_tick() {
     RUN_QUEUE.lock().scheduler_timer_tick();
 }
 
+#[cfg(feature = "preempt")]
+pub fn current_check_preempt_pending() {
+    let curr = crate::current();
+    if curr.get_preempt_pending() && curr.can_preempt(0) {
+        let mut rq = crate::RUN_QUEUE.lock();
+        if curr.get_preempt_pending() {
+            rq.preempt_resched();
+        }
+    }
+}
+
 /// Spawns a new task with the given parameters.
 ///
 /// Returns the task reference.
@@ -96,7 +90,7 @@ pub fn spawn_raw<F>(f: F, name: String, stack_size: usize) -> AxTaskRef
 where
     F: FnOnce() + Send + 'static,
 {
-    let task = TaskInner::new(
+    let task = new_task(
         f,
         name,
         stack_size,
@@ -104,7 +98,7 @@ where
         KERNEL_PROCESS_ID,
         #[cfg(feature = "monolithic")]
         0,
-        #[cfg(feature = "signal")]
+        #[cfg(feature = "monolithic")]
         false,
     );
     RUN_QUEUE.lock().add_task(task.clone());
@@ -158,6 +152,32 @@ pub fn sleep_until(deadline: axhal::time::TimeValue) {
     RUN_QUEUE.lock().sleep_until(deadline);
     #[cfg(not(feature = "irq"))]
     axhal::time::busy_wait_until(deadline);
+}
+
+/// Current task is going to sleep, it will be woken up when the given task exits.
+///
+/// If the given task is already exited, it will return immediately.
+pub fn join(task: &AxTaskRef) -> Option<i32> {
+    get_wait_for_exit_queue(task)
+        .map(|wait_queue| wait_queue.wait_until(|| task.state() == TaskState::Exited));
+    Some(task.get_exit_code())
+}
+
+#[cfg(feature = "monolithic")]
+/// Current task is going to sleep. It will be woken up when the given task does exec syscall or exit.
+pub fn vfork_suspend(task: &AxTaskRef) {
+    get_wait_for_exit_queue(task).map(|wait_queue| {
+        wait_queue.wait_until(|| {
+            // If the given task does the exec syscall, it will be the leader of the new process.
+            task.is_leader() == true || task.state() == TaskState::Exited
+        });
+    });
+}
+
+#[cfg(feature = "monolithic")]
+/// To wake up the task that is blocked because vfork out of current task
+pub fn wake_vfork_process(task: &AxTaskRef) {
+    get_wait_for_exit_queue(task).map(|wait_queue| wait_queue.notify_all(true));
 }
 
 /// Exits the current task.
