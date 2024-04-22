@@ -59,6 +59,9 @@ where
 
     task.init_task_ctx(task_entry as usize, real_kstack_top.into(), tls);
 
+    // 设置 CPU 亲和集
+    task.set_cpu_set((1 << axconfig::SMP) - 1, 1, axconfig::SMP);
+
     task.reset_time_stat(current_time_nanos() as usize);
 
     let axtask = Arc::new(AxTask::new(task));
@@ -99,6 +102,11 @@ pub(crate) fn new_init_task(name: String) -> AxTaskRef {
         #[cfg(feature = "tls")]
         tls_area(),
     )));
+
+    #[cfg(feature = "monolithic")]
+    // 设置 CPU 亲和集
+    axtask.set_cpu_set((1 << axconfig::SMP) - 1, 1, axconfig::SMP);
+
     add_wait_for_exit_queue(&axtask);
     axtask
 }
@@ -163,7 +171,6 @@ extern "C" fn task_entry() -> ! {
     if let Some(entry) = task.get_entry() {
         cfg_if::cfg_if! {
             if #[cfg(feature = "monolithic")] {
-                use alloc::boxed::Box;
                 use axhal::KERNEL_PROCESS_ID;
                 if task.get_process_id() == KERNEL_PROCESS_ID {
                     // 是初始调度进程，直接执行即可

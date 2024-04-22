@@ -313,6 +313,8 @@ pub(crate) fn init() {
     IDLE_TASK.with_current(|i| i.init_by(idle_task.clone()));
 
     let main_task = new_init_task("main".into());
+    #[cfg(feature = "monolithic")]
+    main_task.set_process_id(KERNEL_PROCESS_ID);
     main_task.set_state(TaskState::Running);
 
     RUN_QUEUE.init_by(AxRunQueue::new());
@@ -321,6 +323,8 @@ pub(crate) fn init() {
 
 pub(crate) fn init_secondary() {
     let idle_task = new_init_task("idle".into()); // FIXME: name 现已被用作 prctl 使用的程序名，应另选方式判断 idle 进程
+    #[cfg(feature = "monolithic")]
+    idle_task.set_process_id(KERNEL_PROCESS_ID);
     idle_task.set_state(TaskState::Running);
     IDLE_TASK.with_current(|i| i.init_by(idle_task.clone()));
     unsafe { CurrentTask::init_current(idle_task) }
