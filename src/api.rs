@@ -73,6 +73,7 @@ pub fn on_timer_tick() {
 }
 
 #[cfg(feature = "preempt")]
+/// Checks if the current task should be preempted.
 pub fn current_check_preempt_pending() {
     let curr = crate::current();
     if curr.get_preempt_pending() && curr.can_preempt(0) {
@@ -169,7 +170,7 @@ pub fn vfork_suspend(task: &AxTaskRef) {
     get_wait_for_exit_queue(task).map(|wait_queue| {
         wait_queue.wait_until(|| {
             // If the given task does the exec syscall, it will be the leader of the new process.
-            task.is_leader() == true || task.state() == TaskState::Exited
+            task.is_leader() || task.state() == TaskState::Exited
         });
     });
 }

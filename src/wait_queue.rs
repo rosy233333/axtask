@@ -201,7 +201,7 @@ impl WaitQueue {
         let mut wq = self.queue.lock();
         if let Some(index) = wq.iter().position(|t| Arc::ptr_eq(t, task)) {
             // task.set_in_wait_queue(false);
-            remove_from_wait_queue(&task);
+            remove_from_wait_queue(task);
             rq.unblock_task(wq.remove(index).unwrap(), resched);
             true
         } else {

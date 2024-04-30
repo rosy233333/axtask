@@ -33,7 +33,7 @@ pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
 pub fn cancel_alarm(task: &AxTaskRef) {
     let mut timers = TIMER_LIST.lock();
     // task.set_in_timer_list(false);
-    remove_from_timer_list(&task);
+    remove_from_timer_list(task);
     timers.cancel(|t| Arc::ptr_eq(&t.0, task));
 }
 

@@ -51,10 +51,7 @@ pub(crate) fn add_wait_for_exit_queue(task: &AxTaskRef) {
 }
 
 pub(crate) fn get_wait_for_exit_queue(task: &AxTaskRef) -> Option<Arc<WaitQueue>> {
-    WAIT_FOR_TASK_EXITS
-        .lock()
-        .get(&task.id().as_u64())
-        .map(Arc::clone)
+    WAIT_FOR_TASK_EXITS.lock().get(&task.id().as_u64()).cloned()
 }
 
 /// When the task exits, notify all tasks that are waiting for this task to exit, and

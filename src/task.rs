@@ -24,6 +24,15 @@ pub(crate) fn tls_area() -> (usize, usize) {
 }
 
 #[cfg(feature = "monolithic")]
+/// Create a new task.
+///
+/// # Arguments
+/// - `entry`: The entry function of the task.
+/// - `name`: The name of the task.
+/// - `stack_size`: The size of the stack.
+/// - `process_id`: The process ID of the task.
+/// - `page_table_token`: The page table token of the task.
+/// - `sig_child`: Whether the task will send a signal to its parent when it exits.
 pub fn new_task<F>(
     entry: F,
     name: String,
@@ -55,9 +64,11 @@ where
     let tls = VirtAddr::from(0);
 
     // 当 trap 进内核的时候，内核栈会先存储 trap frame，然后再存储 task context
-    let real_kstack_top = task.get_kernel_stack_top().unwrap() - core::mem::size_of::<TrapFrame>();
-
-    task.init_task_ctx(task_entry as usize, real_kstack_top.into(), tls);
+    task.init_task_ctx(
+        task_entry as usize,
+        (task.get_kernel_stack_top().unwrap() - core::mem::size_of::<TrapFrame>()).into(),
+        tls,
+    );
 
     // 设置 CPU 亲和集
     task.set_cpu_set((1 << axconfig::SMP) - 1, 1, axconfig::SMP);
@@ -70,6 +81,12 @@ where
 }
 
 #[cfg(not(feature = "monolithic"))]
+/// Create a new task.
+///
+/// # Arguments
+/// - `entry`: The entry function of the task.
+/// - `name`: The name of the task.
+/// - `stack_size`: The size of the kernel stack.
 pub fn new_task<F>(entry: F, name: String, stack_size: usize) -> AxTaskRef
 where
     F: FnOnce() + Send + 'static,
