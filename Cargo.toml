@@ -32,20 +32,20 @@ monolithic = ["multitask", "axhal/monolithic", "taskctx/monolithic"]
 cfg-if = "1.0"
 log = "0.4"
 numeric-enum-macro = { git = "https://github.com/mexus/numeric-enum-macro" }
-axhal = { path = "../axhal" }
-axsignal = { path = "../axsignal" }
-axconfig = { path = "../axconfig", optional = true }
-percpu = { path = "../../crates/percpu", optional = true }
-spinlock = { path = "../../crates/spinlock", optional = true }
-lazy_init = { path = "../../crates/lazy_init", optional = true }
-memory_addr = { path = "../../crates/memory_addr", optional = true }
-scheduler = { path = "../../crates/scheduler", optional = true }
-timer_list = { path = "../../crates/timer_list", optional = true }
-kernel_guard = { path = "../../crates/kernel_guard", optional = true }
-taskctx = { path = "../../crates/taskctx" }
-axlog = { path = "../axlog" }
+axhal = { git = "https://github.com/Starry-OS/axhal.git" }
+axsignal = { git = "https://github.com/Starry-OS/axsignal.git" }
+axconfig = { git = "https://github.com/Starry-OS/axconfig.git", optional = true }
+percpu = { git = "https://github.com/Starry-OS/percpu.git", optional = true }
+spinlock = { git = "https://github.com/Starry-OS/spinlock.git", optional = true }
+lazy_init = { git = "https://github.com/Starry-OS/lazy_init.git", optional = true }
+memory_addr = { git = "https://github.com/Starry-OS/memory_addr.git", optional = true }
+scheduler = { git = "https://github.com/Starry-OS/scheduler.git", optional = true }
+timer_list = { git = "https://github.com/Starry-OS/timer_list.git", optional = true }
+kernel_guard = { git = "https://github.com/Starry-OS/kernel_guard.git", optional = true }
+taskctx = { git = "https://github.com/Starry-OS/taskctx.git" }
+axlog = { git = "https://github.com/Starry-OS/axlog.git" }
 
 [dev-dependencies]
 rand = "0.8"
-axhal = { path = "../axhal", features = ["fp_simd"] }
-axtask = { path = ".", features = ["test"] }
+axhal = { git = "https://github.com/Starry-OS/axhal.git", features = ["fp_simd"] }
+axtask = { git = "https://github.com/Starry-OS/axtask.git", features = ["test"] }
