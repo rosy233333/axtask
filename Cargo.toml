@@ -8,6 +8,7 @@ license = "GPL-3.0-or-later OR Apache-2.0"
 homepage = "https://github.com/rcore-os/arceos"
 repository = "https://github.com/rcore-os/arceos/tree/main/modules/axtask"
 documentation = "https://rcore-os.github.io/arceos/axtask/index.html"
+keywords = ["Starry"]
 
 [features]
 default = []
