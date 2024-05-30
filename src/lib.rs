@@ -35,15 +35,15 @@ cfg_if::cfg_if! {
         extern crate log;
         extern crate alloc;
 
-        mod run_queue;
-        pub use run_queue::{IDLE_TASK, RUN_QUEUE, EXITED_TASKS};
+        mod processor;
         mod task;
 
         mod schedule;
         mod api;
         mod wait_queue;
 
-        pub use taskctx::{SchedPolicy, SchedStatus,TaskState};
+        pub use crate::task::TaskState;
+        pub use taskctx::{SchedPolicy, SchedStatus};
 
         #[cfg(feature = "irq")]
         mod timers;
