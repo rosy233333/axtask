@@ -9,8 +9,11 @@ use memory_addr::VirtAddr;
 #[cfg(feature = "monolithic")]
 use axhal::arch::TrapFrame;
 
-use crate::{schedule::add_wait_for_exit_queue, AxTask, AxTaskRef};
+use crate::{processor::Processor, schedule::add_wait_for_exit_queue, AxTask, AxTaskRef};
+
 pub use taskctx::{TaskId, TaskInner};
+
+use spinlock::{SpinNoIrq, SpinNoIrqGuard};
 
 extern "C" {
     fn _stdata();
@@ -21,6 +24,88 @@ extern "C" {
 #[cfg(feature = "tls")]
 pub(crate) fn tls_area() -> (usize, usize) {
     (_stdata as usize, _etbss as usize)
+}
+
+/// The possible states of a task.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[allow(missing_docs)]
+pub enum TaskState {
+    Runable = 1,
+    Blocking = 2,
+    Blocked = 3,
+    Exited = 4,
+}
+
+pub struct ScheduleTask {
+    inner: TaskInner,
+    /// Task state
+    state: SpinNoIrq<TaskState>,
+    /// Task own which Processor
+    processor: SpinNoIrq<Option<&'static Processor>>,
+}
+
+impl ScheduleTask {
+    fn new(inner: TaskInner) -> Self {
+        Self {
+            state: SpinNoIrq::new(TaskState::Runable),
+            processor: SpinNoIrq::new(None),
+            inner: inner,
+        }
+    }
+
+    #[inline]
+    /// lock the task state and ctx_ptr access
+    pub fn state_lock_manual(&self) -> ManuallyDrop<SpinNoIrqGuard<TaskState>> {
+        ManuallyDrop::new(self.state.lock())
+    }
+
+    #[inline]
+    /// set the state of the task
+    pub fn state(&self) -> TaskState {
+        *self.state.lock()
+    }
+
+    #[inline]
+    /// set the state of the task
+    pub fn set_state(&self, state: TaskState) {
+        *self.state.lock() = state
+    }
+
+    /// Whether the task is ready to be scheduled
+    #[inline]
+    pub fn is_runable(&self) -> bool {
+        matches!(*self.state.lock(), TaskState::Runable)
+    }
+
+    /// Whether the task is blocked
+    #[inline]
+    pub fn is_blocked(&self) -> bool {
+        matches!(*self.state.lock(), TaskState::Blocked)
+    }
+
+    /// Whether the task is blocked
+    #[inline]
+    pub(crate) fn init_processor(&self, p: &'static Processor) {
+        *self.processor.lock() = Some(p);
+    }
+
+    /// Whether the task is blocked
+    #[inline]
+    pub(crate) fn get_processor(&self) -> &'static Processor {
+        self.processor
+            .lock()
+            .as_ref()
+            .expect("task {} processor not init")
+    }
+}
+
+impl Deref for ScheduleTask {
+    type Target = TaskInner;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 #[cfg(feature = "monolithic")]
@@ -75,7 +160,7 @@ where
 
     task.reset_time_stat(current_time_nanos() as usize);
 
-    let axtask = Arc::new(AxTask::new(task));
+    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task)));
     add_wait_for_exit_queue(&axtask);
     axtask
 }
@@ -108,16 +193,18 @@ where
         task.get_kernel_stack_top().unwrap().into(),
         tls,
     );
-    let axtask = Arc::new(AxTask::new(task));
+    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task)));
     add_wait_for_exit_queue(&axtask);
     axtask
 }
 
 pub(crate) fn new_init_task(name: String) -> AxTaskRef {
-    let axtask = Arc::new(AxTask::new(taskctx::TaskInner::new_init(
-        name,
-        #[cfg(feature = "tls")]
-        tls_area(),
+    let axtask = Arc::new(AxTask::new(ScheduleTask::new(
+        taskctx::TaskInner::new_init(
+            name,
+            #[cfg(feature = "tls")]
+            tls_area(),
+        ),
     )));
 
     #[cfg(feature = "monolithic")]
@@ -127,6 +214,7 @@ pub(crate) fn new_init_task(name: String) -> AxTaskRef {
     add_wait_for_exit_queue(&axtask);
     axtask
 }
+
 /// A wrapper of [`AxTaskRef`] as the current task.
 pub struct CurrentTask(ManuallyDrop<AxTaskRef>);
 
@@ -173,15 +261,17 @@ impl CurrentTask {
 }
 
 impl Deref for CurrentTask {
-    type Target = TaskInner;
+    type Target = ScheduleTask;
     fn deref(&self) -> &Self::Target {
         self.0.deref()
     }
 }
 
 extern "C" fn task_entry() -> ! {
-    // release the lock that was implicitly held across the reschedule
-    unsafe { crate::RUN_QUEUE.force_unlock() };
+    // SAFETY: INIT when switch_to
+    // First into task entry, manually perform the subsequent work of switch_to
+    crate::schedule::switch_post();
+
     #[cfg(feature = "irq")]
     axhal::arch::enable_irqs();
     let task = crate::current();

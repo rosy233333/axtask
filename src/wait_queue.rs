@@ -1,11 +1,12 @@
+#[cfg(feature = "irq")]
+use crate::schedule::schedule_timeout;
+use crate::schedule::{schedule, wakeup_task};
+use crate::task::TaskState;
+use crate::AxTaskRef;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use spinlock::SpinRaw;
-
-use crate::{
-    schedule::{add_to_wait_queue, in_wait_queue, remove_from_wait_queue},
-    AxRunQueue, AxTaskRef, CurrentTask, RUN_QUEUE,
-};
+use core::sync::atomic::{AtomicBool, Ordering};
+use spinlock::SpinNoIrq;
 
 /// A queue to store sleeping tasks.
 ///
@@ -29,52 +30,91 @@ use crate::{
 /// WQ.wait(); // block until `notify()` is called
 /// assert_eq!(VALUE.load(Ordering::Relaxed), 1);
 /// ```
+///
+///
+struct Waiter {
+    task: AxTaskRef,
+    in_wait: AtomicBool,
+}
+
+impl Waiter {
+    /// Creates a waiter.
+    fn new(task: AxTaskRef) -> Arc<Self> {
+        Arc::new(Waiter {
+            in_wait: AtomicBool::new(false),
+            task: task,
+        })
+    }
+
+    fn in_wait(&self) -> bool {
+        self.in_wait.load(Ordering::Acquire)
+    }
+
+    fn set_in_wait(&self, val: bool) {
+        self.in_wait.store(val, Ordering::Relaxed)
+    }
+}
+
 pub struct WaitQueue {
-    queue: SpinRaw<VecDeque<AxTaskRef>>, // we already disabled IRQs when lock the `RUN_QUEUE`
+    // Support queue lock by external caller,use SpinNoIrq
+    // Arceos SpinNoirq current implementation implies irq_save,
+    // so it can be nested
+    // TODO: use linked list has good performance
+    queue: SpinNoIrq<VecDeque<Arc<Waiter>>>,
 }
 
 impl WaitQueue {
     /// Creates an empty wait queue.
     pub const fn new() -> Self {
         Self {
-            queue: SpinRaw::new(VecDeque::new()),
+            queue: SpinNoIrq::new(VecDeque::new()),
         }
     }
 
     /// Creates an empty wait queue with space for at least `capacity` elements.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            queue: SpinRaw::new(VecDeque::with_capacity(capacity)),
+            queue: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
         }
     }
 
-    fn cancel_events(&self, curr: CurrentTask) {
-        // A task can be wake up only one events (timer or `notify()`), remove
-        // the event from another queue.
-        if in_wait_queue(curr.as_task_ref()) {
-            // wake up by timer (timeout).
-            // `RUN_QUEUE` is not locked here, so disable IRQs.
-            let _guard = kernel_guard::IrqSave::new();
-            self.queue.lock().retain(|t| !curr.ptr_eq(t));
-            // curr.set_in_wait_queue(false);
-            remove_from_wait_queue(curr.as_task_ref());
-        }
-        #[cfg(feature = "irq")]
-        if crate::schedule::in_timer_list(curr.as_task_ref()) {
-            // timeout was set but not triggered (wake up by `WaitQueue::notify()`)
-            crate::timers::cancel_alarm(curr.as_task_ref());
-        }
-    }
-
+    // CPU0 wait                CPU1 notify           CPU2 signal
+    // q.lock()
+    // task.lock()
+    // task.state = blocking
+    // task.unlock()
+    // q.unlock()
+    //                          q.lock()
+    //                          task = q.get;
+    //                          wakeup(task)
+    //                            task == blocking
+    //                              task = runable
+    //                          q.unlock()
+    // schedule()
+    // queue.lock().remove(curr)
+    //
     /// Blocks the current task and put it into the wait queue, until other task
     /// notifies it.
     pub fn wait(&self) {
-        RUN_QUEUE.lock().block_current(|task| {
-            // task.set_in_wait_queue(true);
-            add_to_wait_queue(&task);
-            self.queue.lock().push_back(task)
-        });
-        self.cancel_events(crate::current());
+        let curr = crate::current();
+
+        let mut queue = self.queue.lock();
+        curr.set_state(TaskState::Blocking);
+        let waiter = Waiter::new(curr.clone());
+        waiter.set_in_wait(true);
+        queue.push_back(waiter.clone());
+        drop(queue);
+
+        schedule();
+
+        // maybe wakeup by signal or others, try to delete again
+        // TODO: 
+        // 1. starry support UNINTERRUPT mask, no need to check
+        // 2. starry support INTERRUPTABLE mask, still need to check
+        let mut queue = self.queue.lock();
+        if waiter.in_wait() {
+            queue.retain(|t| !Arc::<Waiter>::ptr_eq(&waiter, t));
+        }
     }
 
     /// Blocks the current task and put it into the wait queue, until the given
@@ -86,42 +126,58 @@ impl WaitQueue {
     where
         F: Fn() -> bool,
     {
+        let curr = crate::current();
+        let waiter = Waiter::new(curr.clone());
+
         loop {
-            let mut rq = RUN_QUEUE.lock();
             if condition() {
                 break;
             }
-            rq.block_current(|task| {
-                // task.set_in_wait_queue(true);
-                add_to_wait_queue(&task);
-                self.queue.lock().push_back(task);
-            });
+            let mut queue = self.queue.lock();
+            curr.set_state(TaskState::Blocking);
+            //maybe wakeup by signal or others, should check before push
+            if !waiter.in_wait() {
+                waiter.set_in_wait(true);
+                queue.push_back(waiter.clone());
+            }
+            drop(queue);
+            schedule();
         }
-        self.cancel_events(crate::current());
+
+        //maybe wakeup by signal or others, try to delete again
+        let mut queue = self.queue.lock();
+        if waiter.in_wait() {
+            queue.retain(|t| !Arc::<Waiter>::ptr_eq(&waiter, t));
+        }
     }
 
     /// Blocks the current task and put it into the wait queue, until other tasks
     /// notify it, or the given duration has elapsed.
     #[cfg(feature = "irq")]
     pub fn wait_timeout(&self, dur: core::time::Duration) -> bool {
-        use crate::schedule::{add_to_wait_queue, in_wait_queue};
         let curr = crate::current();
+        let waiter = Waiter::new(curr.clone());
+
         let deadline = axhal::time::current_time() + dur;
-        debug!(
+        error!(
             "task wait_timeout: {} deadline={:?}",
             curr.id_name(),
             deadline
         );
-        crate::timers::set_alarm_wakeup(deadline, curr.clone());
 
-        RUN_QUEUE.lock().block_current(|task| {
-            // task.set_in_wait_queue(true);
-            add_to_wait_queue(&task);
-            self.queue.lock().push_back(task)
-        });
-        // let timeout = curr.in_wait_queue(); // still in the wait queue, must have timed out
-        let timeout = in_wait_queue(curr.as_task_ref());
-        self.cancel_events(curr);
+        let mut queue = self.queue.lock();
+        curr.set_state(TaskState::Blocking);
+        waiter.set_in_wait(true);
+        queue.push_back(waiter.clone());
+        drop(queue);
+
+        let timeout = schedule_timeout(deadline);
+
+        //maybe wakeup by timer or signal, try to delete again
+        let mut queue = self.queue.lock();
+        if waiter.in_wait() {
+            queue.retain(|t| !Arc::<Waiter>::ptr_eq(&waiter, t));
+        }
         timeout
     }
 
@@ -136,95 +192,74 @@ impl WaitQueue {
         F: Fn() -> bool,
     {
         let curr = crate::current();
+        let waiter = Waiter::new(curr.clone());
+
         let deadline = axhal::time::current_time() + dur;
         debug!(
             "task wait_timeout: {}, deadline={:?}",
             curr.id_name(),
             deadline
         );
-        crate::timers::set_alarm_wakeup(deadline, curr.clone());
 
-        let mut timeout = true;
-        while axhal::time::current_time() < deadline {
-            let mut rq = RUN_QUEUE.lock();
+        let mut timeout = false;
+        loop {
             if condition() {
-                timeout = false;
                 break;
             }
-            rq.block_current(|task| {
-                // task.set_in_wait_queue(true);
-                add_to_wait_queue(&task);
-                self.queue.lock().push_back(task);
-            });
+            let mut queue = self.queue.lock();
+            curr.set_state(TaskState::Blocking);
+            //maybe wakeup by signal or others, should check before push
+            if !waiter.in_wait() {
+                waiter.set_in_wait(true);
+                queue.push_back(waiter.clone());
+            }
+            drop(queue);
+
+            timeout = schedule_timeout(deadline);
+            if timeout {
+                break;
+            }
         }
-        self.cancel_events(curr);
+
+        //maybe wakeup by timer or signal, try to delete again
+        let mut queue = self.queue.lock();
+        if waiter.in_wait() {
+            queue.retain(|t| !Arc::<Waiter>::ptr_eq(&waiter, t));
+        }
         timeout
     }
 
-    /// Wakes up one task in the wait queue, usually the first one.
-    ///
-    /// If `resched` is true, the current task will be preempted when the
-    /// preemption is enabled.
-    pub fn notify_one(&self, resched: bool) -> bool {
-        let mut rq = RUN_QUEUE.lock();
-        if !self.queue.lock().is_empty() {
-            self.notify_one_locked(resched, &mut rq)
+    /// Wake up the given task in the wait queue.
+    pub fn notify_task(&self, task: &AxTaskRef) -> bool {
+        let mut wq = self.queue.lock();
+
+        if let Some(index) = wq.iter().position(|t| Arc::ptr_eq(&t.task, task)) {
+            let waiter = wq.remove(index).unwrap();
+            waiter.set_in_wait(false);
+            wakeup_task(waiter.task.clone());
+            true
         } else {
             false
         }
+    }
+
+    /// Wakes up one task in the wait queue, usually the first one.
+    pub fn notify_one(&self) -> bool {
+        let mut queue = self.queue.lock();
+        if let Some(waiter) = queue.pop_front() {
+            waiter.set_in_wait(false);
+            wakeup_task(waiter.task.clone());
+            return true;
+        }
+        false
     }
 
     /// Wakes all tasks in the wait queue.
-    ///
-    /// If `resched` is true, the current task will be preempted when the
-    /// preemption is enabled.
-    pub fn notify_all(&self, resched: bool) {
+    pub fn notify_all(&self) {
         loop {
-            let mut rq = RUN_QUEUE.lock();
-            if let Some(task) = self.queue.lock().pop_front() {
-                // task.set_in_wait_queue(false);
-                remove_from_wait_queue(&task);
-                rq.unblock_task(task, resched);
-            } else {
+            if !self.notify_one() {
                 break;
             }
-            drop(rq); // we must unlock `RUN_QUEUE` after unlocking `self.queue`.
-        }
-    }
-
-    /// Wake up the given task in the wait queue.
-    ///
-    /// If `resched` is true, the current task will be preempted when the
-    /// preemption is enabled.
-    pub fn notify_task(&self, resched: bool, task: &AxTaskRef) -> bool {
-        let mut rq = RUN_QUEUE.lock();
-        let mut wq = self.queue.lock();
-        if let Some(index) = wq.iter().position(|t| Arc::ptr_eq(t, task)) {
-            // task.set_in_wait_queue(false);
-            remove_from_wait_queue(task);
-            rq.unblock_task(wq.remove(index).unwrap(), resched);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn notify_one_locked(&self, resched: bool, rq: &mut AxRunQueue) -> bool {
-        if let Some(task) = self.queue.lock().pop_front() {
-            // task.set_in_wait_queue(false);
-            remove_from_wait_queue(&task);
-            rq.unblock_task(task, resched);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn notify_all_locked(&self, resched: bool, rq: &mut AxRunQueue) {
-        while let Some(task) = self.queue.lock().pop_front() {
-            // task.set_in_wait_queue(false);
-            remove_from_wait_queue(&task);
-            rq.unblock_task(task, resched);
         }
     }
 }

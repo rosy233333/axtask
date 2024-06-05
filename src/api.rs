@@ -3,15 +3,16 @@
 use alloc::{string::String, sync::Arc};
 #[cfg(feature = "monolithic")]
 use axhal::KERNEL_PROCESS_ID;
-use taskctx::TaskState;
 
-pub(crate) use crate::run_queue::{AxRunQueue, RUN_QUEUE};
+use crate::task::{ScheduleTask, TaskState};
 
 use crate::schedule::get_wait_for_exit_queue;
 #[doc(cfg(feature = "multitask"))]
-pub use crate::task::{new_task, CurrentTask, TaskId, TaskInner};
+pub use crate::task::{new_task, CurrentTask, TaskId};
 #[doc(cfg(feature = "multitask"))]
 pub use crate::wait_queue::WaitQueue;
+
+pub use crate::processor::{current_processor, Processor};
 
 /// The reference type of a task.
 pub type AxTaskRef = Arc<AxTask>;
@@ -19,15 +20,15 @@ pub type AxTaskRef = Arc<AxTask>;
 cfg_if::cfg_if! {
     if #[cfg(feature = "sched_rr")] {
         const MAX_TIME_SLICE: usize = 5;
-        pub(crate) type AxTask = scheduler::RRTask<TaskInner, MAX_TIME_SLICE>;
-        pub(crate) type Scheduler = scheduler::RRScheduler<TaskInner, MAX_TIME_SLICE>;
+        pub(crate) type AxTask = scheduler::RRTask<ScheduleTask, MAX_TIME_SLICE>;
+        pub(crate) type Scheduler = scheduler::RRScheduler<ScheduleTask, MAX_TIME_SLICE>;
     } else if #[cfg(feature = "sched_cfs")] {
-        pub(crate) type AxTask = scheduler::CFSTask<TaskInner>;
-        pub(crate) type Scheduler = scheduler::CFScheduler<TaskInner>;
+        pub(crate) type AxTask = scheduler::CFSTask<ScheduleTask>;
+        pub(crate) type Scheduler = scheduler::CFScheduler<ScheduleTask>;
     } else {
         // If no scheduler features are set, use FIFO as the default.
-        pub(crate) type AxTask = scheduler::FifoTask<TaskInner>;
-        pub(crate) type Scheduler = scheduler::FifoScheduler<TaskInner>;
+        pub(crate) type AxTask = scheduler::FifoTask<ScheduleTask>;
+        pub(crate) type Scheduler = scheduler::FifoScheduler<ScheduleTask>;
     }
 }
 
@@ -50,7 +51,7 @@ pub fn current() -> CurrentTask {
 pub fn init_scheduler() {
     info!("Initialize scheduling...");
 
-    crate::run_queue::init();
+    crate::processor::init();
     #[cfg(feature = "irq")]
     crate::timers::init();
 
@@ -59,7 +60,7 @@ pub fn init_scheduler() {
 
 /// Initializes the task scheduler for secondary CPUs.
 pub fn init_scheduler_secondary() {
-    crate::run_queue::init_secondary();
+    crate::processor::init_secondary();
 }
 
 /// Handles periodic timer ticks for the task manager.
@@ -69,18 +70,22 @@ pub fn init_scheduler_secondary() {
 #[doc(cfg(feature = "irq"))]
 pub fn on_timer_tick() {
     crate::timers::check_events();
-    RUN_QUEUE.lock().scheduler_timer_tick();
+    crate::schedule::scheduler_timer_tick();
 }
 
 #[cfg(feature = "preempt")]
 /// Checks if the current task should be preempted.
+/// This api called after handle irq,it may be on a
+/// disable_preempt ctx
 pub fn current_check_preempt_pending() {
     let curr = crate::current();
-    if curr.get_preempt_pending() && curr.can_preempt(0) {
-        let mut rq = crate::RUN_QUEUE.lock();
-        if curr.get_preempt_pending() {
-            rq.preempt_resched();
-        }
+    if curr.get_preempt_pending() && curr.can_preempt() {
+        debug!(
+            "current {} is to be preempted , allow {}",
+            curr.id_name(),
+            curr.can_preempt()
+        );
+        crate::schedule::schedule()
     }
 }
 
@@ -102,7 +107,7 @@ where
         #[cfg(feature = "monolithic")]
         false,
     );
-    RUN_QUEUE.lock().add_task(task.clone());
+    Processor::first_add_task(task.clone());
     task
 }
 
@@ -129,13 +134,13 @@ where
 ///
 /// [CFS]: https://en.wikipedia.org/wiki/Completely_Fair_Scheduler
 pub fn set_priority(prio: isize) -> bool {
-    RUN_QUEUE.lock().set_current_priority(prio)
+    crate::schedule::set_current_priority(prio)
 }
 
 /// Current task gives up the CPU time voluntarily, and switches to another
 /// ready task.
 pub fn yield_now() {
-    RUN_QUEUE.lock().yield_current();
+    crate::schedule::yield_current();
 }
 
 /// Current task is going to sleep for the given duration.
@@ -150,15 +155,25 @@ pub fn sleep(dur: core::time::Duration) {
 /// If the feature `irq` is not enabled, it uses busy-wait instead.
 pub fn sleep_until(deadline: axhal::time::TimeValue) {
     #[cfg(feature = "irq")]
-    RUN_QUEUE.lock().sleep_until(deadline);
+    crate::schedule::schedule_timeout(deadline);
     #[cfg(not(feature = "irq"))]
     axhal::time::busy_wait_until(deadline);
+}
+/// wake up task
+pub fn wakeup_task(task: AxTaskRef) {
+    crate::schedule::wakeup_task(task)
 }
 
 /// Current task is going to sleep, it will be woken up when the given task exits.
 ///
 /// If the given task is already exited, it will return immediately.
 pub fn join(task: &AxTaskRef) -> Option<i32> {
+    let curr = crate::current();
+    error!(
+        "task {} enter join wait task {} ",
+        curr.id().as_u64(),
+        task.id().as_u64()
+    );
     get_wait_for_exit_queue(task)
         .map(|wait_queue| wait_queue.wait_until(|| task.state() == TaskState::Exited));
     Some(task.get_exit_code())
@@ -178,12 +193,12 @@ pub fn vfork_suspend(task: &AxTaskRef) {
 #[cfg(feature = "monolithic")]
 /// To wake up the task that is blocked because vfork out of current task
 pub fn wake_vfork_process(task: &AxTaskRef) {
-    get_wait_for_exit_queue(task).map(|wait_queue| wait_queue.notify_all(true));
+    get_wait_for_exit_queue(task).map(|wait_queue| wait_queue.notify_all());
 }
 
 /// Exits the current task.
 pub fn exit(exit_code: i32) -> ! {
-    RUN_QUEUE.lock().exit_current(exit_code)
+    crate::schedule::exit_current(exit_code)
 }
 
 /// The idle task routine.
@@ -192,7 +207,7 @@ pub fn exit(exit_code: i32) -> ! {
 pub fn run_idle() -> ! {
     loop {
         yield_now();
-        debug!("idle task: waiting for IRQs...");
+        //debug!("idle task: waiting for IRQs...");
         #[cfg(feature = "irq")]
         axhal::arch::wait_for_irqs();
     }
