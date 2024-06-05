@@ -5,8 +5,7 @@ use core::mem::ManuallyDrop;
 use crate::processor::{current_processor, PrevCtxSave, Processor};
 use crate::task::{CurrentTask, TaskState};
 use crate::{AxTaskRef, WaitQueue};
-use spinlock::SpinNoIrq;
-use spinlock::SpinNoIrqGuard;
+use spinlock::{SpinNoIrq, SpinNoIrqOnlyGuard};
 
 /// A map to store tasks' wait queues, which stores tasks that are waiting for this task to exit.
 pub(crate) static WAIT_FOR_TASK_EXITS: SpinNoIrq<BTreeMap<u64, Arc<WaitQueue>>> =
@@ -172,7 +171,7 @@ fn switch_to(mut next_task: AxTaskRef) {
     trace!(
         "context switch: {} -> {}",
         prev_task.id_name(),
-        next_task.id_name()
+        next_task.id_name(),
     );
 
     unsafe {
@@ -197,29 +196,18 @@ fn switch_to(mut next_task: AxTaskRef) {
             }
         }
 
-        let prev_ctx = PrevCtxSave::new(
-            core::mem::transmute::<
-                ManuallyDrop<SpinNoIrqGuard<'_, TaskState>>,
-                ManuallyDrop<SpinNoIrqGuard<'static, TaskState>>,
-            >(prev_state_lock),
-            next_task,
-        );
+        let prev_ctx = PrevCtxSave::new(core::mem::transmute::<
+            ManuallyDrop<SpinNoIrqOnlyGuard<'_, TaskState>>,
+            ManuallyDrop<SpinNoIrqOnlyGuard<'static, TaskState>>,
+        >(prev_state_lock));
 
         current_processor().set_prev_ctx_save(prev_ctx);
 
+        CurrentTask::set_current(prev_task, next_task);
+
         axhal::arch::task_context_switch(&mut (*prev_ctx_ptr), &(*next_ctx_ptr));
 
-        switch_post();
-    }
-}
+        current_processor().switch_post();
 
-pub(crate) fn switch_post() {
-    let prev = crate::current();
-    let next_task = current_processor().switch_post();
-
-    // current set must happend after PROCESSOR switch_post
-    // otherwise task lock/unlock change preempt on the wrong current task
-    unsafe {
-        CurrentTask::set_current(prev, next_task);
     }
 }

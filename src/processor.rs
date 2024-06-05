@@ -4,8 +4,7 @@ use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_init::LazyInit;
 use scheduler::BaseScheduler;
-use spinlock::SpinNoIrq;
-use spinlock::SpinNoIrqGuard;
+use spinlock::{SpinNoIrq, SpinNoIrqOnlyGuard, SpinNoIrqOnly};
 
 #[cfg(feature = "monolithic")]
 use axhal::KERNEL_PROCESS_ID;
@@ -14,7 +13,8 @@ use crate::task::{new_init_task, new_task, CurrentTask, TaskState};
 
 use crate::{AxTaskRef, Scheduler, WaitQueue};
 
-static mut PROCESSORS: VecDeque<&'static Processor> = VecDeque::new();
+static PROCESSORS: SpinNoIrqOnly<VecDeque<&'static Processor>> = 
+    SpinNoIrqOnly::new(VecDeque::new());
 
 #[percpu::def_percpu]
 static PROCESSOR: LazyInit<Processor> = LazyInit::new();
@@ -140,16 +140,9 @@ impl Processor {
 
     #[inline]
     /// post process prev_ctx_save
-    pub(crate) fn switch_post(&self) -> AxTaskRef {
-        use core::mem::MaybeUninit;
-        let mut next_task: MaybeUninit<AxTaskRef> = MaybeUninit::uninit();
+    pub(crate) fn switch_post(&self) {
         let mut prev_ctx = self.prev_ctx_save.lock();
-
-        if let Some(prev_lock_state) = prev_ctx.prev_lock_state.take() {
-            // SAFETY: next_task is init on here
-            unsafe {
-                next_task.as_mut_ptr().write(prev_ctx.next.take().unwrap());
-            }
+        if let Some(prev_lock_state) = prev_ctx.get_mut().take() {
             // Note the lock sequence: prev_lock_state.lock -> prev_ctx_save.lock ->
             // prev_ctx_save.unlock -> prev_lock_state.unlock
             drop(prev_ctx);
@@ -157,8 +150,6 @@ impl Processor {
         } else {
             panic!("no prev ctx");
         }
-        // SAFETY: next_task is init
-        unsafe { next_task.assume_init() }
     }
 
     #[inline]
@@ -170,11 +161,8 @@ impl Processor {
     #[inline]
     /// Processor Clean all
     pub fn clean_all() {
-        // SAFETY: PROCESSORS is just used to read
-        unsafe {
-            for p in PROCESSORS.iter() {
-                p.clean()
-            }
+        for p in PROCESSORS.lock().iter() {
+            p.clean()
         }
     }
 
@@ -197,13 +185,10 @@ impl Processor {
     #[inline]
     /// Add task to processor
     fn select_one_processor() -> &'static Processor {
-        // SAFETY: PROCESSORS is just used to read
-        unsafe {
-            PROCESSORS
-                .iter()
-                .min_by_key(|p| p.task_nr.load(Ordering::Acquire))
-                .unwrap()
-        }
+        PROCESSORS.lock()
+            .iter()
+            .min_by_key(|p| p.task_nr.load(Ordering::Acquire))
+            .unwrap()
     }
 }
 
@@ -211,27 +196,28 @@ pub fn current_processor() -> &'static Processor {
     unsafe { PROCESSOR.current_ref_raw() }
 }
 
-pub(crate) struct PrevCtxSave {
-    prev_lock_state: Option<ManuallyDrop<SpinNoIrqGuard<'static, TaskState>>>,
-    next: Option<AxTaskRef>,
-}
+pub(crate) struct PrevCtxSave(Option<ManuallyDrop<SpinNoIrqOnlyGuard<'static, TaskState>>>);
 
 impl PrevCtxSave {
     pub(crate) fn new(
-        prev_lock_state: ManuallyDrop<SpinNoIrqGuard<'static, TaskState>>,
-        next: AxTaskRef,
+        prev_lock_state: ManuallyDrop<SpinNoIrqOnlyGuard<'static, TaskState>>,
     ) -> PrevCtxSave {
-        Self {
-            prev_lock_state: Some(prev_lock_state),
-            next: Some(next),
-        }
+        Self(Some(prev_lock_state))
     }
 
     const fn new_empty() -> PrevCtxSave {
-        Self {
-            prev_lock_state: None,
-            next: None,
-        }
+        Self(None)
+    }
+
+    #[allow(unused)]
+    pub(crate) fn get(&self) -> &Option<ManuallyDrop<SpinNoIrqOnlyGuard<'static, TaskState>>> {
+        &self.0
+    }
+
+    pub(crate) fn get_mut(
+        &mut self,
+    ) -> &mut Option<ManuallyDrop<SpinNoIrqOnlyGuard<'static, TaskState>>> {
+        &mut self.0
     }
 }
 
@@ -259,14 +245,12 @@ pub(crate) fn init() {
 
     let processor = Processor::new(idle_task.clone());
     PROCESSOR.with_current(|i| i.init_by(processor));
-
     current_processor().gc_init();
-    //SAFETY: each CPU call only once
-    unsafe { PROCESSORS.push_back(PROCESSOR.current_ref_raw()) };
+    PROCESSORS.lock().push_back(current_processor());
 
     main_task.init_processor(current_processor());
 
-    unsafe { CurrentTask::init_current(main_task) }
+    unsafe { CurrentTask::init_current(main_task)}
 }
 
 pub(crate) fn init_secondary() {
@@ -278,8 +262,7 @@ pub(crate) fn init_secondary() {
     let processor = Processor::new(idle_task.clone());
     PROCESSOR.with_current(|i| i.init_by(processor));
     current_processor().gc_init();
-    //SAFETY: each CPU call only once
-    unsafe { PROCESSORS.push_back(PROCESSOR.current_ref_raw()) };
+    PROCESSORS.lock().push_back(current_processor());
 
     unsafe { CurrentTask::init_current(idle_task) };
 }
