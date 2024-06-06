@@ -9,11 +9,13 @@ use memory_addr::VirtAddr;
 #[cfg(feature = "monolithic")]
 use axhal::arch::TrapFrame;
 
-use crate::{processor::Processor, schedule::add_wait_for_exit_queue, AxTask, AxTaskRef};
+use crate::{
+    current_processor, processor::Processor, schedule::add_wait_for_exit_queue, AxTask, AxTaskRef,
+};
 
 pub use taskctx::{TaskId, TaskInner};
 
-use spinlock::{SpinNoIrq, SpinNoIrqGuard};
+use spinlock::{SpinNoIrq, SpinNoIrqOnly, SpinNoIrqOnlyGuard};
 
 extern "C" {
     fn _stdata();
@@ -40,7 +42,7 @@ pub enum TaskState {
 pub struct ScheduleTask {
     inner: TaskInner,
     /// Task state
-    state: SpinNoIrq<TaskState>,
+    state: SpinNoIrqOnly<TaskState>,
     /// Task own which Processor
     processor: SpinNoIrq<Option<&'static Processor>>,
 }
@@ -48,7 +50,7 @@ pub struct ScheduleTask {
 impl ScheduleTask {
     fn new(inner: TaskInner) -> Self {
         Self {
-            state: SpinNoIrq::new(TaskState::Runable),
+            state: SpinNoIrqOnly::new(TaskState::Runable),
             processor: SpinNoIrq::new(None),
             inner: inner,
         }
@@ -56,7 +58,7 @@ impl ScheduleTask {
 
     #[inline]
     /// lock the task state and ctx_ptr access
-    pub fn state_lock_manual(&self) -> ManuallyDrop<SpinNoIrqGuard<TaskState>> {
+    pub fn state_lock_manual(&self) -> ManuallyDrop<SpinNoIrqOnlyGuard<TaskState>> {
         ManuallyDrop::new(self.state.lock())
     }
 
@@ -270,7 +272,8 @@ impl Deref for CurrentTask {
 extern "C" fn task_entry() -> ! {
     // SAFETY: INIT when switch_to
     // First into task entry, manually perform the subsequent work of switch_to
-    crate::schedule::switch_post();
+
+    current_processor().switch_post();
 
     #[cfg(feature = "irq")]
     axhal::arch::enable_irqs();

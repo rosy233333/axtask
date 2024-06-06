@@ -168,12 +168,6 @@ pub fn wakeup_task(task: AxTaskRef) {
 ///
 /// If the given task is already exited, it will return immediately.
 pub fn join(task: &AxTaskRef) -> Option<i32> {
-    let curr = crate::current();
-    error!(
-        "task {} enter join wait task {} ",
-        curr.id().as_u64(),
-        task.id().as_u64()
-    );
     get_wait_for_exit_queue(task)
         .map(|wait_queue| wait_queue.wait_until(|| task.state() == TaskState::Exited));
     Some(task.get_exit_code())
