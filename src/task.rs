@@ -74,10 +74,22 @@ impl ScheduleTask {
         *self.state.lock() = state
     }
 
-    /// Whether the task is ready to be scheduled
+    /// Whether the task is Exited
+    #[inline]
+    pub fn is_exited(&self) -> bool {
+        matches!(*self.state.lock(), TaskState::Exited)
+    }
+
+    /// Whether the task is runnalbe
     #[inline]
     pub fn is_runable(&self) -> bool {
         matches!(*self.state.lock(), TaskState::Runable)
+    }
+
+    /// Whether the task is blocking
+    #[inline]
+    pub fn is_blocking(&self) -> bool {
+        matches!(*self.state.lock(), TaskState::Blocking)
     }
 
     /// Whether the task is blocked

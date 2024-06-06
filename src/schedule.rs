@@ -62,7 +62,6 @@ pub fn schedule_timeout(deadline: axhal::time::TimeValue) -> bool {
     debug!("task sleep: {}, deadline={:?}", curr.id_name(), deadline);
     assert!(!curr.is_idle());
     crate::timers::set_alarm_wakeup(deadline, curr.clone());
-    curr.set_state(TaskState::Blocking);
     schedule();
     let timeout = axhal::time::current_time() >= deadline;
     // may wake up by others
