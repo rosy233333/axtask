@@ -40,6 +40,7 @@ cfg_if::cfg_if! {
 
         mod schedule;
         mod api;
+        mod wait_list;
         mod wait_queue;
 
         pub use crate::task::TaskState;
@@ -51,6 +52,7 @@ cfg_if::cfg_if! {
         #[doc(cfg(feature = "multitask"))]
         pub use self::api::*;
         pub use self::api::{sleep, sleep_until, yield_now};
+
     } else {
         mod api_s;
         pub use self::api_s::{sleep, sleep_until, yield_now};
