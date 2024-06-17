@@ -1,13 +1,11 @@
 #[cfg(feature = "irq")]
 use crate::schedule::schedule_timeout;
-use crate::schedule::{schedule, wakeup_task};
-use crate::task::TaskState;
-use crate::AxTaskRef;
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
+use crate::schedule::schedule;
 use spinlock::SpinNoIrq;
-
+use crate::wait_list::WaitTaskList;
+use crate::wait_list::WaitTaskNode;
+use crate::AxTaskRef;
+use alloc::sync::Arc;
 /// A queue to store sleeping tasks.
 ///
 /// # Examples
@@ -31,50 +29,26 @@ use spinlock::SpinNoIrq;
 /// assert_eq!(VALUE.load(Ordering::Relaxed), 1);
 /// ```
 ///
-///
-struct Waiter {
-    task: AxTaskRef,
-    in_wait: AtomicBool,
-}
 
-impl Waiter {
-    /// Creates a waiter.
-    fn new(task: AxTaskRef) -> Arc<Self> {
-        Arc::new(Waiter {
-            in_wait: AtomicBool::new(false),
-            task: task,
-        })
-    }
-
-    fn in_wait(&self) -> bool {
-        self.in_wait.load(Ordering::Acquire)
-    }
-
-    fn set_in_wait(&self, val: bool) {
-        self.in_wait.store(val, Ordering::Relaxed)
-    }
+macro_rules! declare_wait {
+     ($name: ident) => {
+         let $name = Arc::new(WaitTaskNode::new(crate::current().clone()));
+     };
 }
 
 pub struct WaitQueue {
     // Support queue lock by external caller,use SpinNoIrq
     // Arceos SpinNoirq current implementation implies irq_save,
     // so it can be nested
-    // TODO: use linked list has good performance
-    queue: SpinNoIrq<VecDeque<Arc<Waiter>>>,
+    // use linked list has good performance
+    queue: SpinNoIrq<WaitTaskList>,
 }
 
 impl WaitQueue {
     /// Creates an empty wait queue.
     pub const fn new() -> Self {
         Self {
-            queue: SpinNoIrq::new(VecDeque::new()),
-        }
-    }
-
-    /// Creates an empty wait queue with space for at least `capacity` elements.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            queue: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
+            queue: SpinNoIrq::new(WaitTaskList::new()),
         }
     }
 
@@ -96,25 +70,14 @@ impl WaitQueue {
     /// Blocks the current task and put it into the wait queue, until other task
     /// notifies it.
     pub fn wait(&self) {
-        let curr = crate::current();
-
-        let mut queue = self.queue.lock();
-        curr.set_state(TaskState::Blocking);
-        let waiter = Waiter::new(curr.clone());
-        waiter.set_in_wait(true);
-        queue.push_back(waiter.clone());
-        drop(queue);
-
+        declare_wait!(waiter);
+        self.queue.lock().prepare_to_wait(waiter.clone());
         schedule();
 
         // maybe wakeup by signal or others, try to delete again
-        // TODO: 
         // 1. starry support UNINTERRUPT mask, no need to check
         // 2. starry support INTERRUPTABLE mask, still need to check
-        let mut queue = self.queue.lock();
-        if waiter.in_wait() {
-            queue.retain(|t| !Arc::<Waiter>::ptr_eq(&waiter, t));
-        }
+        self.queue.lock().remove(&waiter);
     }
 
     /// Blocks the current task and put it into the wait queue, until the given
@@ -126,58 +89,33 @@ impl WaitQueue {
     where
         F: Fn() -> bool,
     {
-        let curr = crate::current();
-        let waiter = Waiter::new(curr.clone());
-
+        declare_wait!(waiter);
         loop {
             if condition() {
                 break;
             }
-            let mut queue = self.queue.lock();
-            curr.set_state(TaskState::Blocking);
-            //maybe wakeup by signal or others, should check before push
-            if !waiter.in_wait() {
-                waiter.set_in_wait(true);
-                queue.push_back(waiter.clone());
-            }
-            drop(queue);
+            // maybe wakeup by signal or others, should check before push
+            // wait_list will do check
+            self.queue.lock().prepare_to_wait(waiter.clone());
             schedule();
         }
 
         //maybe wakeup by signal or others, try to delete again
-        let mut queue = self.queue.lock();
-        if waiter.in_wait() {
-            queue.retain(|t| !Arc::<Waiter>::ptr_eq(&waiter, t));
-        }
+        self.queue.lock().remove(&waiter);
     }
 
     /// Blocks the current task and put it into the wait queue, until other tasks
     /// notify it, or the given duration has elapsed.
     #[cfg(feature = "irq")]
     pub fn wait_timeout(&self, dur: core::time::Duration) -> bool {
-        let curr = crate::current();
-        let waiter = Waiter::new(curr.clone());
-
+        declare_wait!(waiter);
         let deadline = axhal::time::current_time() + dur;
-        error!(
-            "task wait_timeout: {} deadline={:?}",
-            curr.id_name(),
-            deadline
-        );
 
-        let mut queue = self.queue.lock();
-        curr.set_state(TaskState::Blocking);
-        waiter.set_in_wait(true);
-        queue.push_back(waiter.clone());
-        drop(queue);
-
+        self.queue.lock().prepare_to_wait(waiter.clone());
         let timeout = schedule_timeout(deadline);
 
         //maybe wakeup by timer or signal, try to delete again
-        let mut queue = self.queue.lock();
-        if waiter.in_wait() {
-            queue.retain(|t| !Arc::<Waiter>::ptr_eq(&waiter, t));
-        }
+        self.queue.lock().remove(&waiter);
         timeout
     }
 
@@ -191,30 +129,15 @@ impl WaitQueue {
     where
         F: Fn() -> bool,
     {
-        let curr = crate::current();
-        let waiter = Waiter::new(curr.clone());
-
+        declare_wait!(waiter);
         let deadline = axhal::time::current_time() + dur;
-        debug!(
-            "task wait_timeout: {}, deadline={:?}",
-            curr.id_name(),
-            deadline
-        );
-
         let mut timeout = false;
         loop {
             if condition() {
                 break;
             }
-            let mut queue = self.queue.lock();
-            curr.set_state(TaskState::Blocking);
             //maybe wakeup by signal or others, should check before push
-            if !waiter.in_wait() {
-                waiter.set_in_wait(true);
-                queue.push_back(waiter.clone());
-            }
-            drop(queue);
-
+            self.queue.lock().prepare_to_wait(waiter.clone());
             timeout = schedule_timeout(deadline);
             if timeout {
                 break;
@@ -222,44 +145,22 @@ impl WaitQueue {
         }
 
         //maybe wakeup by timer or signal, try to delete again
-        let mut queue = self.queue.lock();
-        if waiter.in_wait() {
-            queue.retain(|t| !Arc::<Waiter>::ptr_eq(&waiter, t));
-        }
+        self.queue.lock().remove(&waiter);
         timeout
     }
 
     /// Wake up the given task in the wait queue.
     pub fn notify_task(&self, task: &AxTaskRef) -> bool {
-        let mut wq = self.queue.lock();
-
-        if let Some(index) = wq.iter().position(|t| Arc::ptr_eq(&t.task, task)) {
-            let waiter = wq.remove(index).unwrap();
-            waiter.set_in_wait(false);
-            wakeup_task(waiter.task.clone());
-            true
-        } else {
-            false
-        }
+        self.queue.lock().notify_task(task)
     }
 
     /// Wakes up one task in the wait queue, usually the first one.
     pub fn notify_one(&self) -> bool {
-        let mut queue = self.queue.lock();
-        if let Some(waiter) = queue.pop_front() {
-            waiter.set_in_wait(false);
-            wakeup_task(waiter.task.clone());
-            return true;
-        }
-        false
+        self.queue.lock().notify_one()
     }
 
     /// Wakes all tasks in the wait queue.
     pub fn notify_all(&self) {
-        loop {
-            if !self.notify_one() {
-                break;
-            }
-        }
+        self.queue.lock().notify_all()
     }
 }

@@ -45,6 +45,7 @@ timer_list = { git = "https://github.com/Starry-OS/timer_list.git", optional = t
 kernel_guard = { git = "https://github.com/Starry-OS/kernel_guard.git", optional = true }
 taskctx = { git = "https://github.com/Starry-OS/taskctx.git" }
 axlog = { git = "https://github.com/Starry-OS/axlog.git" }
+linked_list = { git = "https://github.com/Starry-OS/linked_list.git" }
 
 [dev-dependencies]
 rand = "0.8"
