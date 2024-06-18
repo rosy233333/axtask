@@ -30,9 +30,10 @@ use alloc::sync::Arc;
 /// ```
 ///
 
+#[macro_export]
 macro_rules! declare_wait {
      ($name: ident) => {
-         let $name = Arc::new(WaitTaskNode::new(crate::current().clone()));
+         let $name = Arc::new(WaitTaskNode::new($crate::current().as_task_ref().clone()));
      };
 }
 

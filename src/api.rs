@@ -14,6 +14,11 @@ pub use crate::wait_queue::WaitQueue;
 
 pub use crate::processor::{current_processor, Processor};
 
+pub use crate::schedule::schedule;
+
+#[cfg(feature = "irq")]
+pub use crate::schedule::schedule_timeout;
+
 /// The reference type of a task.
 pub type AxTaskRef = Arc<AxTask>;
 

@@ -43,6 +43,7 @@ cfg_if::cfg_if! {
         mod wait_list;
         mod wait_queue;
 
+        pub use wait_list::{WaitTaskList, WaitTaskNode};
         pub use crate::task::TaskState;
         pub use taskctx::{SchedPolicy, SchedStatus};
 
