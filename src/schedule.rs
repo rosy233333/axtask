@@ -207,6 +207,5 @@ fn switch_to(mut next_task: AxTaskRef) {
         axhal::arch::task_context_switch(&mut (*prev_ctx_ptr), &(*next_ctx_ptr));
 
         current_processor().switch_post();
-
     }
 }

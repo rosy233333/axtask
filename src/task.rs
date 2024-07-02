@@ -138,7 +138,6 @@ pub fn new_task<F>(
     stack_size: usize,
     process_id: u64,
     page_table_token: usize,
-    sig_child: bool,
 ) -> AxTaskRef
 where
     F: FnOnce() + Send + 'static,
@@ -153,7 +152,6 @@ where
         stack_size,
         process_id,
         page_table_token,
-        sig_child,
         #[cfg(feature = "tls")]
         tls_area(),
     );

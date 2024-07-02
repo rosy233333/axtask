@@ -4,7 +4,7 @@ use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_init::LazyInit;
 use scheduler::BaseScheduler;
-use spinlock::{SpinNoIrq, SpinNoIrqOnlyGuard, SpinNoIrqOnly};
+use spinlock::{SpinNoIrq, SpinNoIrqOnly, SpinNoIrqOnlyGuard};
 
 #[cfg(feature = "monolithic")]
 use axhal::KERNEL_PROCESS_ID;
@@ -13,7 +13,7 @@ use crate::task::{new_init_task, new_task, CurrentTask, TaskState};
 
 use crate::{AxTaskRef, Scheduler, WaitQueue};
 
-static PROCESSORS: SpinNoIrqOnly<VecDeque<&'static Processor>> = 
+static PROCESSORS: SpinNoIrqOnly<VecDeque<&'static Processor>> =
     SpinNoIrqOnly::new(VecDeque::new());
 
 #[percpu::def_percpu]
@@ -49,13 +49,11 @@ impl Processor {
             KERNEL_PROCESS_ID,
             #[cfg(feature = "monolithic")]
             0,
-            #[cfg(feature = "monolithic")]
-            false,
         );
 
         Processor {
             scheduler: SpinNoIrq::new(Scheduler::new()),
-            idle_task: idle_task,
+            idle_task,
             prev_ctx_save: SpinNoIrq::new(PrevCtxSave::new_empty()),
             exited_tasks: SpinNoIrq::new(VecDeque::new()),
             gc_wait: WaitQueue::new(),
@@ -185,7 +183,8 @@ impl Processor {
     #[inline]
     /// Add task to processor
     fn select_one_processor() -> &'static Processor {
-        PROCESSORS.lock()
+        PROCESSORS
+            .lock()
             .iter()
             .min_by_key(|p| p.task_nr.load(Ordering::Acquire))
             .unwrap()
@@ -235,8 +234,6 @@ pub(crate) fn init() {
         KERNEL_PROCESS_ID,
         #[cfg(feature = "monolithic")]
         0,
-        #[cfg(feature = "monolithic")]
-        false,
     );
 
     let main_task = new_init_task("main".into());
@@ -250,7 +247,7 @@ pub(crate) fn init() {
 
     main_task.init_processor(current_processor());
 
-    unsafe { CurrentTask::init_current(main_task)}
+    unsafe { CurrentTask::init_current(main_task) }
 }
 
 pub(crate) fn init_secondary() {

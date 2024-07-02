@@ -86,8 +86,8 @@ pub fn current_check_preempt_pending() {
     let curr = crate::current();
     // if task is already exited or blocking,
     // no need preempt, they are rescheduling
-    if curr.get_preempt_pending() && curr.can_preempt() &&
-        !curr.is_exited() && !curr.is_blocking(){
+    if curr.get_preempt_pending() && curr.can_preempt() && !curr.is_exited() && !curr.is_blocking()
+    {
         debug!(
             "current {} is to be preempted , allow {}",
             curr.id_name(),
@@ -112,8 +112,6 @@ where
         KERNEL_PROCESS_ID,
         #[cfg(feature = "monolithic")]
         0,
-        #[cfg(feature = "monolithic")]
-        false,
     );
     Processor::first_add_task(task.clone());
     task
