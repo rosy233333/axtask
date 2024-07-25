@@ -116,10 +116,19 @@ fn switch_to(mut next_task: AxTaskRef) {
         prev_task.id_name()
     );
 
+
+    // When the prev_task state_lock is locked, it records the irq configuration of
+    // the prev_task at that time, after swich(in switch_post) it would be unlocked,
+    // and restore the irq configuration to the lock_state store(NOTE: it own the prev_task).
+    //
+    // so have to save the prev_task irq config here,and restore it after swich_post
+    #[cfg(feature = "irq")]
+    prev_task.set_irq_state(axhal::arch::irqs_enabled());
+
     // Here must lock curr state, and no one can change curr state
     // when excuting ctx_switch
     let mut prev_state_lock = prev_task.state_lock_manual();
-
+    
     loop {
         match **prev_state_lock {
             TaskState::Runable => {
@@ -207,5 +216,6 @@ fn switch_to(mut next_task: AxTaskRef) {
         axhal::arch::task_context_switch(&mut (*prev_ctx_ptr), &(*next_ctx_ptr));
 
         current_processor().switch_post();
+
     }
 }
