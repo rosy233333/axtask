@@ -16,6 +16,7 @@ use crate::{
 pub use taskctx::{TaskId, TaskInner};
 
 use spinlock::{SpinNoIrq, SpinNoIrqOnly, SpinNoIrqOnlyGuard};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 extern "C" {
     fn _stdata();
@@ -41,6 +42,8 @@ pub enum TaskState {
 
 pub struct ScheduleTask {
     inner: TaskInner,
+    /// Store task irq state
+    irq_state: AtomicBool,
     /// Task state
     state: SpinNoIrqOnly<TaskState>,
     /// Task own which Processor
@@ -48,10 +51,11 @@ pub struct ScheduleTask {
 }
 
 impl ScheduleTask {
-    fn new(inner: TaskInner) -> Self {
+    fn new(inner: TaskInner, irq_init_state: bool) -> Self {
         Self {
             state: SpinNoIrqOnly::new(TaskState::Runable),
             processor: SpinNoIrq::new(None),
+            irq_state: AtomicBool::new(irq_init_state),
             inner: inner,
         }
     }
@@ -111,6 +115,20 @@ impl ScheduleTask {
             .lock()
             .as_ref()
             .expect("task {} processor not init")
+    }
+
+    /// set irq state
+    #[cfg(feature = "irq")]
+    #[inline]
+    pub(crate) fn set_irq_state(&self, irq_state: bool) {
+        self.irq_state.store(irq_state,Ordering::Relaxed);
+    }
+
+    /// get irq state
+    #[cfg(feature = "irq")]
+    #[inline]
+    pub(crate) fn get_irq_state(&self) -> bool {
+        self.irq_state.load(Ordering::Relaxed)
     }
 }
 
@@ -172,7 +190,8 @@ where
 
     task.reset_time_stat(current_time_nanos() as usize);
 
-    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task)));
+    // a new task start, irq should be enabled by default
+    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task,true)));
     add_wait_for_exit_queue(&axtask);
     axtask
 }
@@ -205,18 +224,22 @@ where
         task.get_kernel_stack_top().unwrap().into(),
         tls,
     );
-    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task)));
+    // a new task start, irq should be enabled by default
+    let axtask = Arc::new(AxTask::new(ScheduleTask::new(task, true)));
     add_wait_for_exit_queue(&axtask);
     axtask
 }
 
 pub(crate) fn new_init_task(name: String) -> AxTaskRef {
+    // init task irq should be disabled by default 
+    // it would be reinit when switch happend
     let axtask = Arc::new(AxTask::new(ScheduleTask::new(
         taskctx::TaskInner::new_init(
             name,
             #[cfg(feature = "tls")]
             tls_area(),
         ),
+        false,
     )));
 
     #[cfg(feature = "monolithic")]
@@ -282,11 +305,9 @@ impl Deref for CurrentTask {
 extern "C" fn task_entry() -> ! {
     // SAFETY: INIT when switch_to
     // First into task entry, manually perform the subsequent work of switch_to
-
+    
     current_processor().switch_post();
 
-    #[cfg(feature = "irq")]
-    axhal::arch::enable_irqs();
     let task = crate::current();
     if let Some(entry) = task.get_entry() {
         cfg_if::cfg_if! {

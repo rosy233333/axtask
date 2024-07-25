@@ -148,6 +148,15 @@ impl Processor {
         } else {
             panic!("no prev ctx");
         }
+
+        #[cfg(feature = "irq")]
+        {
+            let curr = crate::current();
+            match curr.get_irq_state() {
+                true => axhal::arch::enable_irqs(),
+                false => axhal::arch::disable_irqs(),
+            }
+        }
     }
 
     #[inline]
